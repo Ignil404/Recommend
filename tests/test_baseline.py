@@ -148,15 +148,15 @@ class TestTimeBasedSplit:
         # User 1: 5 interactions
         for i in range(5):
             data.append({"user_id": 1, "movie_id": i, "rating": 4.0, "timestamp": 1000 + i})
-        # User 2: only 1 interaction (goes to test)
+        # User 2: only 1 interaction - should go to train (minimum 1 train item)
         data.append({"user_id": 2, "movie_id": 10, "rating": 4.0, "timestamp": 2000})
 
         ratings = pd.DataFrame(data)
         train, test = time_based_split(ratings, test_ratio=0.2)
 
-        # User 2 should have 0 train, 1 test
-        assert len(train[train["user_id"] == 2]) == 0
-        assert len(test[test["user_id"] == 2]) == 1
+        # User 2 has 1 interaction, goes to train (minimum 1 train item enforced)
+        assert len(train[train["user_id"] == 2]) == 1
+        assert len(test[test["user_id"] == 2]) == 0
 
 
 class TestPopularityBaseline:

@@ -161,6 +161,43 @@ class MeanRatingBaseline(BaseRecommender):
         return self.global_mean_
 
 
+class RandomRecommender(BaseRecommender):
+    """Random recommender for diagnostic baseline.
+
+    Recommends random items from the training set item pool.
+    Uses a fixed seed for reproducibility.
+    """
+
+    def __init__(self, seed: int = 42) -> None:
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
+        self.item_pool_: list[int] = []
+
+    def fit(self, train_ratings: pd.DataFrame) -> None:
+        """Fit random model on training data.
+
+        Args:
+            train_ratings: DataFrame with columns [user_id, movie_id, rating, timestamp]
+        """
+        self.item_pool_ = train_ratings["movie_id"].unique().tolist()
+        logger.info(f"RandomRecommender fitted on {len(train_ratings)} ratings, {len(self.item_pool_)} items")
+
+    def recommend(self, user_id: int, k: int = 10) -> list[int]:
+        """Return K random items from the pool.
+
+        Args:
+            user_id: User ID (unused)
+            k: Number of recommendations
+
+        Returns:
+            List of K random movie_ids
+        """
+        if not self.item_pool_:
+            return []
+        k = min(k, len(self.item_pool_))
+        return self.rng.choice(self.item_pool_, size=k, replace=False).tolist()
+
+
 def time_based_split(
     ratings: pd.DataFrame,
     test_ratio: float = 0.2,
@@ -181,32 +218,105 @@ def time_based_split(
     Returns:
         Tuple of (train_df, test_df)
     """
+    return _time_based_split_impl(
+        ratings, test_ratio=test_ratio, val_ratio=0.0,
+        timestamp_col=timestamp_col, user_col=user_col
+    )[:2]
+
+
+def time_based_train_val_test_split(
+    ratings: pd.DataFrame,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.2,
+    timestamp_col: str = "timestamp",
+    user_col: str = "user_id",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split ratings chronologically per user into train/val/test.
+
+    For each user:
+    - First (1 - val_ratio - test_ratio) fraction -> train
+    - Next val_ratio fraction -> val
+    - Last test_ratio fraction -> test
+
+    Args:
+        ratings: DataFrame with columns [user_id, movie_id, rating, timestamp]
+        val_ratio: Fraction of interactions per user to use as val (default 0.1)
+        test_ratio: Fraction of interactions per user to use as test (default 0.2)
+        timestamp_col: Name of timestamp column
+        user_col: Name of user ID column
+
+    Returns:
+        Tuple of (train_df, val_df, test_df)
+    """
+    return _time_based_split_impl(
+        ratings, test_ratio=test_ratio, val_ratio=val_ratio,
+        timestamp_col=timestamp_col, user_col=user_col
+    )
+
+
+def _time_based_split_impl(
+    ratings: pd.DataFrame,
+    test_ratio: float = 0.2,
+    val_ratio: float = 0.0,
+    timestamp_col: str = "timestamp",
+    user_col: str = "user_id",
+) -> tuple[pd.DataFrame, ...]:
+    """Internal implementation for time-based splits.
+
+    Args:
+        ratings: DataFrame with columns [user_id, movie_id, rating, timestamp]
+        test_ratio: Fraction of interactions per user to use as test
+        val_ratio: Fraction of interactions per user to use as val (0 for train/test only)
+        timestamp_col: Name of timestamp column
+        user_col: Name of user ID column
+
+    Returns:
+        Tuple of (train_df, test_df) if val_ratio=0, else (train_df, val_df, test_df)
+    """
     # Sort by user then timestamp
     ratings_sorted = ratings.sort_values([user_col, timestamp_col])
 
-    # Compute split point per user
-    user_counts = ratings_sorted.groupby(user_col).size()
-    test_counts = (user_counts * test_ratio).astype(int).clip(lower=1)
-
-    # Build train/test masks
+    # Build train/val/test masks using timestamp quantiles for strict temporal ordering
     train_indices = []
+    val_indices = []
     test_indices = []
 
     for user_id, group in ratings_sorted.groupby(user_col):
-        n_test = test_counts.get(user_id, 1)
-        n_train = len(group) - n_test
+        n = len(group)
+        if n < 3:
+            # Too few interactions: all go to train
+            train_indices.extend(group.index.tolist())
+            continue
 
-        if n_train > 0:
-            train_indices.extend(group.iloc[:n_train].index.tolist())
-        test_indices.extend(group.iloc[n_train:].index.tolist())
+        # Compute quantile-based split points
+        test_start_idx = int(n * (1 - test_ratio))
+        val_start_idx = int(n * (1 - test_ratio - val_ratio))
+
+        # Ensure at least 1 item in each split if possible
+        test_start_idx = max(1, min(test_start_idx, n - 1))
+        val_start_idx = max(1, min(val_start_idx, test_start_idx))
+
+        train_indices.extend(group.iloc[:val_start_idx].index.tolist())
+        if val_ratio > 0:
+            val_indices.extend(group.iloc[val_start_idx:test_start_idx].index.tolist())
+        test_indices.extend(group.iloc[test_start_idx:].index.tolist())
 
     train_df = ratings_sorted.loc[train_indices].reset_index(drop=True)
     test_df = ratings_sorted.loc[test_indices].reset_index(drop=True)
 
     logger.info(f"Time-based split: train={len(train_df)}, test={len(test_df)}")
 
-    # Verify no data leakage
-    verify_no_leakage(train_df, test_df, user_col, timestamp_col)
+    # Verify no data leakage (allow equality for timestamps that fall on boundary)
+    verify_no_leakage(train_df, test_df, user_col, timestamp_col, allow_boundary=True)
+
+    if val_ratio > 0:
+        val_df = ratings_sorted.loc[val_indices].reset_index(drop=True)
+        logger.info(f"Time-based split: val={len(val_df)}")
+        # Verify val doesn't overlap with test in time
+        verify_no_leakage(val_df, test_df, user_col, timestamp_col, allow_boundary=True)
+        # Verify train doesn't overlap with val in time
+        verify_no_leakage(train_df, val_df, user_col, timestamp_col, allow_boundary=True)
+        return train_df, val_df, test_df
 
     return train_df, test_df
 
@@ -216,6 +326,7 @@ def verify_no_leakage(
     test: pd.DataFrame,
     user_col: str = "user_id",
     timestamp_col: str = "timestamp",
+    allow_boundary: bool = False,
 ) -> None:
     """Verify no test timestamp precedes any train timestamp for the same user.
 
@@ -224,6 +335,7 @@ def verify_no_leakage(
         test: Test DataFrame
         user_col: Name of user ID column
         timestamp_col: Name of timestamp column
+        allow_boundary: If True, allow min_test_ts == max_train_ts (for boundary splits)
 
     Raises:
         ValueError: If data leakage detected
@@ -238,11 +350,18 @@ def verify_no_leakage(
         max_train_ts = train_user[timestamp_col].max()
         min_test_ts = test_user[timestamp_col].min()
 
-        if min_test_ts < max_train_ts:
-            raise ValueError(
-                f"Data leakage detected for user {user_id}: "
-                f"test timestamp {min_test_ts} < train timestamp {max_train_ts}"
-            )
+        if allow_boundary:
+            if min_test_ts < max_train_ts:
+                raise ValueError(
+                    f"Data leakage detected for user {user_id}: "
+                    f"test timestamp {min_test_ts} < train timestamp {max_train_ts}"
+                )
+        else:
+            if min_test_ts <= max_train_ts:
+                raise ValueError(
+                    f"Data leakage detected for user {user_id}: "
+                    f"test timestamp {min_test_ts} <= train timestamp {max_train_ts}"
+                )
 
     logger.debug("No data leakage verified")
 
@@ -377,6 +496,14 @@ def main() -> None:
     mean_metrics = evaluate(mean_model, train, test, k=10)
     print(f"Precision@10: {mean_metrics['precision_at_10']:.4f}")
     print(f"Recall@10:    {mean_metrics['recall_at_10']:.4f}")
+
+    # Random Baseline
+    print("\n--- Random Baseline ---")
+    rand_model = RandomRecommender(seed=42)
+    rand_model.fit(train)
+    rand_metrics = evaluate(rand_model, train, test, k=10)
+    print(f"Precision@10: {rand_metrics['precision_at_10']:.4f}")
+    print(f"Recall@10:    {rand_metrics['recall_at_10']:.4f}")
 
 
 if __name__ == "__main__":
