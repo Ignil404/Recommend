@@ -16,7 +16,11 @@ from src.models.baseline import (
     evaluate,
     time_based_split,
 )
-from src.models.collaborative import ItemItemKNNRecommender, SVDRecommender
+from src.models.collaborative import (
+    ALSRecommender,
+    ItemItemKNNRecommender,
+    SVDRecommender,
+)
 from src.models.content_based import ContentBasedRecommender
 from src.models.hybrid import CFHybridRecommender, HybridRecommender
 
@@ -46,8 +50,10 @@ def run(name: str, model, train: pd.DataFrame, test: pd.DataFrame) -> dict[str, 
     metrics = evaluate(model, train, test, k=K)
     elapsed = time.time() - start
     print(
-        f"{name:15s} P@{K}={metrics['precision_at_10']:.4f} "
-        f"R@{K}={metrics['recall_at_10']:.4f} ({elapsed:.1f}s)"
+        f"{name:26s} P@{K}={metrics['precision_at_10']:.4f} "
+        f"NDCG@{K}={metrics['ndcg_at_10']:.4f} "
+        f"cov={metrics['coverage']:.3f} "
+        f"nov={metrics['novelty']:5.2f} ({elapsed:.1f}s)"
     )
     return metrics
 
@@ -68,6 +74,7 @@ def main() -> None:
     run("MeanRating", MeanRatingBaseline(min_ratings=5), train, test)
     run("ItemItemKNN", ItemItemKNNRecommender(n_neighbors=50), train, test)
     run("SVD", SVDRecommender(n_factors=50), train, test)
+    run("ALS (implicit)", ALSRecommender(n_factors=50), train, test)
     run("ContentBased", ContentBasedRecommender(min_rating_for_like=4.0), train, test)
     run(f"Hybrid(a={BEST_ALPHA})", HybridRecommender(alpha=BEST_ALPHA), train, test)
     run(

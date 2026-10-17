@@ -57,6 +57,25 @@ start vector.
 - **WHEN** the model is fitted twice on the same training data
 - **THEN** the latent factors (and therefore the recommendations) match
 
+### Requirement: Implicit-feedback ALS model
+The system SHALL factorize the confidence-weighted preference matrix with
+alternating least squares (Hu et al. 2008), where preferences are binary
+(liked items are 1) and confidence is `1 + alpha * rating`.
+
+#### Scenario: Closed-form alternating updates
+- **WHEN** each ALS iteration runs
+- **THEN** factors are solved as `(W^T C^u W + reg*I)^-1 W^T C^u p(u)` for
+  users and symmetrically for items
+
+#### Scenario: Ranking objective differs from rating SVD
+- **WHEN** ALS and rating-optimized SVD are compared on the temporal test split
+- **THEN** ALS ranks items by reconstructed preference, not predicted rating,
+  so it does not favour obscure 1-2 rating items the way SVD does
+
+#### Scenario: Deterministic initialization
+- **WHEN** the model is fitted twice with the same seed
+- **THEN** the recommendations are identical
+
 ### Requirement: Evaluation on the shared protocol
 The system SHALL be evaluated with the shared benchmark script on the temporal
 80/20 split at k=10, alongside all other models.

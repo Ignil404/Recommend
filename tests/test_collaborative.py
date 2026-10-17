@@ -12,7 +12,11 @@ from src.models.baseline import (
     evaluate,
     time_based_split,
 )
-from src.models.collaborative import ItemItemKNNRecommender, SVDRecommender
+from src.models.collaborative import (
+    ALSRecommender,
+    ItemItemKNNRecommender,
+    SVDRecommender,
+)
 
 CLUSTER_A = list(range(1, 7))
 CLUSTER_B = list(range(7, 13))
@@ -260,3 +264,66 @@ class TestCollaborativeOnMovieLens:
             assert len(set(recs)) == 10
             seen = train[train["user_id"] == user_id]["movie_id"].tolist()
             assert not any(item in seen for item in recs)
+
+
+class TestALSRecommender:
+    """Tests for the implicit-feedback ALS recommender."""
+
+    @pytest.fixture
+    def cluster_data(self):
+        """Clustered training data plus held-out item per user."""
+        return make_clustered_ratings()
+
+    @pytest.fixture
+    def train(self, cluster_data):
+        """Training ratings."""
+        return cluster_data[0]
+
+    @pytest.fixture
+    def model(self, train):
+        """Fitted ALS model."""
+        model = ALSRecommender(n_factors=2, iterations=10)
+        model.fit(train)
+        return model
+
+    def test_ranks_held_out_item_first(self, model, cluster_data):
+        """The unseen same-cluster item must be ranked first."""
+        _, held_out = cluster_data
+        for user_id in [1, 7, 20, 40]:
+            assert model.recommend(user_id, k=1) == [held_out[user_id]]
+
+    def test_seen_items_excluded(self, model, train):
+        """Rated items must never be recommended."""
+        for user_id in [1, 11]:
+            seen = set(train[train["user_id"] == user_id]["movie_id"].tolist())
+            recs = model.recommend(user_id, k=3)
+            assert not any(item in seen for item in recs)
+
+    def test_cold_start_falls_back_to_popularity(self, model, train):
+        """Users without training data get popular items."""
+        popularity = PopularityBaseline()
+        popularity.fit(train)
+        assert model.recommend(999, k=5) == popularity.recommend(999, k=5)
+
+    def test_recommendations_are_python_ints(self, model):
+        """Recommendation lists must contain plain ints (serializable)."""
+        for item_id in model.recommend(1, k=3):
+            assert type(item_id) is int
+
+    def test_deterministic(self, train):
+        """The fixed random seed makes factor initialization reproducible."""
+        first = ALSRecommender(n_factors=2, iterations=5)
+        second = ALSRecommender(n_factors=2, iterations=5)
+        first.fit(train)
+        second.fit(train)
+        assert first.recommend(1, k=3) == second.recommend(1, k=3)
+
+    def test_preferences_are_binary(self, train):
+        """Liked items carry preference 1.0, confidence exceeds 1.0."""
+        model = ALSRecommender(n_factors=2, iterations=2)
+        model.fit(train)
+        user_idx = model.user_id_to_idx_[1]
+        partners, values = model.user_items_[user_idx]
+        assert set(np.unique(values[:, 1])) <= {0.0, 1.0}
+        assert float(values[:, 0].min()) > 1.0
+        assert partners.size > 0

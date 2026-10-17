@@ -417,6 +417,93 @@ def recall_at_k(
     return len(rec_k & relevant_items) / len(relevant_items)
 
 
+def ndcg_at_k(
+    recommendations: list[int],
+    relevant_items: set[int],
+    k: int = 10,
+) -> float:
+    """Compute Normalized Discounted Cumulative Gain@K (binary relevance).
+
+    Args:
+        recommendations: List of recommended item IDs
+        relevant_items: Set of relevant item IDs for the user
+        k: Cutoff (default 10)
+
+    Returns:
+        NDCG@K score in [0, 1]
+    """
+    if not relevant_items or k == 0:
+        return 0.0
+
+    reciprocal_logs = 1.0 / np.log2(np.arange(2, k + 2))
+    gains = np.array(
+        [1.0 if item_id in relevant_items else 0.0 for item_id in recommendations[:k]]
+    )
+    dcg = float((gains * reciprocal_logs[: len(gains)]).sum())
+    ideal_gains = min(len(relevant_items), k)
+    idcg = float(reciprocal_logs[:ideal_gains].sum())
+    if idcg == 0:
+        return 0.0
+    return dcg / idcg
+
+
+def average_precision_at_k(
+    recommendations: list[int],
+    relevant_items: set[int],
+    k: int = 10,
+) -> float:
+    """Compute Average Precision@K (binary relevance).
+
+    Args:
+        recommendations: List of recommended item IDs
+        relevant_items: Set of relevant item IDs for the user
+        k: Cutoff (default 10)
+
+    Returns:
+        AP@K score in [0, 1]
+    """
+    if not relevant_items or k == 0:
+        return 0.0
+
+    hits = 0
+    precision_sum = 0.0
+    for rank, item_id in enumerate(recommendations[:k], start=1):
+        if item_id in relevant_items:
+            hits += 1
+            precision_sum += hits / rank
+    return precision_sum / min(len(relevant_items), k)
+
+
+def novelty_at_k(
+    recommendations: list[int],
+    item_popularity: dict[int, int],
+    total_ratings: int,
+    k: int = 10,
+) -> float:
+    """Compute average self-information of the top-K recommendations.
+
+    Novelty of an item is -log2(popularity), so recommending obscure items
+    scores higher than recommending popular ones.
+
+    Args:
+        recommendations: List of recommended item IDs
+        item_popularity: Mapping of item_id to its training rating count
+        total_ratings: Total number of training ratings
+        k: Cutoff (default 10)
+
+    Returns:
+        Average novelty (bits) of the top-K items
+    """
+    if not recommendations or k == 0 or total_ratings == 0:
+        return 0.0
+    informations = []
+    for item_id in recommendations[:k]:
+        count = item_popularity.get(item_id, 0)
+        probability = count / total_ratings if count else 1.0 / total_ratings
+        informations.append(-np.log2(probability))
+    return float(np.mean(informations))
+
+
 def evaluate(
     model: BaseRecommender,
     train_ratings: pd.DataFrame,
@@ -425,7 +512,11 @@ def evaluate(
     user_col: str = "user_id",
     item_col: str = "movie_id",
 ) -> dict[str, float]:
-    """Evaluate model using Precision@K and Recall@K with macro-averaging.
+    """Evaluate a recommender with ranking and diversity metrics.
+
+    Metrics are macro-averaged over the users present in the test split:
+    precision, recall, NDCG and MAP at K, plus catalogue coverage and the
+    average self-information (novelty, in bits) of the returned items.
 
     Args:
         model: Fitted recommender model
@@ -436,7 +527,8 @@ def evaluate(
         item_col: Name of item ID column
 
     Returns:
-        Dictionary with 'precision_at_k' and 'recall_at_k' (macro-averaged)
+        Dictionary with macro-averaged precision/recall/NDCG/MAP at k, plus
+        catalogue coverage and average novelty of the recommendations
     """
     # Build test relevance sets per user
     test_relevant = test_ratings.groupby(user_col)[item_col].apply(set).to_dict()
@@ -444,8 +536,16 @@ def evaluate(
     # Only evaluate users present in test set
     test_users = list(test_relevant.keys())
 
+    item_popularity = train_ratings.groupby(item_col).size().to_dict()
+    catalog = set(item_popularity)
+    total_ratings = len(train_ratings)
+
     precisions = []
     recalls = []
+    ndcgs = []
+    aps = []
+    novelties = []
+    recommended_items: set[int] = set()
 
     for user_id in test_users:
         relevant = test_relevant[user_id]
@@ -455,19 +555,35 @@ def evaluate(
         recommendations = model.recommend(user_id, k=k)
         precisions.append(precision_at_k(recommendations, relevant, k))
         recalls.append(recall_at_k(recommendations, relevant, k))
+        ndcgs.append(ndcg_at_k(recommendations, relevant, k))
+        aps.append(average_precision_at_k(recommendations, relevant, k))
+        novelties.append(
+            novelty_at_k(recommendations, item_popularity, total_ratings, k)
+        )
+        recommended_items.update(recommendations[:k])
 
     macro_precision = np.mean(precisions) if precisions else 0.0
     macro_recall = np.mean(recalls) if recalls else 0.0
+    macro_ndcg = np.mean(ndcgs) if ndcgs else 0.0
+    macro_map = np.mean(aps) if aps else 0.0
+    mean_novelty = np.mean(novelties) if novelties else 0.0
+    coverage = len(recommended_items) / len(catalog) if catalog else 0.0
 
     logger.info(
         f"Evaluation (k={k}): Precision@{k}={macro_precision:.4f}, "
-        f"Recall@{k}={macro_recall:.4f}"
+        f"Recall@{k}={macro_recall:.4f}, NDCG@{k}={macro_ndcg:.4f}, "
+        f"MAP@{k}={macro_map:.4f}, coverage={coverage:.4f}, "
+        f"novelty={mean_novelty:.2f} bits"
     )
     logger.info(f"Evaluated on {len(test_users)} users")
 
     return {
         f"precision_at_{k}": macro_precision,
         f"recall_at_{k}": macro_recall,
+        f"ndcg_at_{k}": macro_ndcg,
+        f"map_at_{k}": macro_map,
+        "coverage": coverage,
+        "novelty": mean_novelty,
         "n_users_evaluated": len(test_users),
     }
 

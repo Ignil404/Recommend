@@ -453,6 +453,210 @@ class SVDRecommender(BaseRecommender):
         )
 
 
+class ALSRecommender(BaseRecommender):
+    """Implicit-feedback recommender trained with alternating least squares.
+
+    Follows Hu et al. (2008): interactions are turned into preferences
+    (liked items are 1, everything else 0) with confidence
+
+        c_ui = 1 + alpha * rating
+
+    and factors are found by alternating closed-form least squares:
+
+        x_u = (W^T C^u W + reg*I)^-1 W^T C^u p(u)
+
+    Unlike rating-optimized SVD, this objective directly targets the items a
+    user interacts with, so ranking by the reconstructed score works for top-N
+    recommendation.
+    """
+
+    def __init__(
+        self,
+        n_factors: int = 50,
+        alpha: float = 40.0,
+        regularization: float = 0.1,
+        iterations: int = 15,
+        min_rating_for_like: float = 4.0,
+        seed: int = 42,
+    ) -> None:
+        self.n_factors = n_factors
+        self.alpha = alpha
+        self.regularization = regularization
+        self.iterations = iterations
+        self.min_rating_for_like = min_rating_for_like
+        self.seed = seed
+
+        # Fitted attributes
+        self.user_id_to_idx_: dict[int, int] = {}
+        self.idx_to_user_id_: dict[int, int] = {}
+        self.item_id_to_idx_: dict[int, int] = {}
+        self.idx_to_item_id_: dict[int, int] = {}
+        self.user_factors_: np.ndarray | None = None
+        self.item_factors_: np.ndarray | None = None
+        self.user_items_: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self.seen_items_: dict[int, set[int]] = {}
+        self.popularity_model_: PopularityBaseline = PopularityBaseline()
+
+    def fit(self, train_ratings: pd.DataFrame) -> None:
+        """Fit implicit ALS on training data.
+
+        Args:
+            train_ratings: DataFrame with columns [user_id, movie_id, rating, timestamp]
+        """
+        (
+            self.user_id_to_idx_,
+            self.idx_to_user_id_,
+            self.item_id_to_idx_,
+            self.idx_to_item_id_,
+        ) = _build_id_mappings(train_ratings)
+
+        n_users = len(self.user_id_to_idx_)
+        n_items = len(self.item_id_to_idx_)
+        n_factors = min(self.n_factors, min(n_users, n_items) - 1)
+
+        # Confidence and preference per observed pair (positional, not labels)
+        liked_mask = (
+            train_ratings["rating"] >= self.min_rating_for_like
+        ).to_numpy()
+        confidence = (1.0 + self.alpha * train_ratings["rating"].to_numpy()).astype(
+            np.float32
+        )
+        preferences = liked_mask.astype(np.float32)
+        values = np.stack([confidence, preferences], axis=1)
+
+        rows = train_ratings["user_id"].map(self.user_id_to_idx_).to_numpy()
+        cols = train_ratings["movie_id"].map(self.item_id_to_idx_).to_numpy()
+
+        # Group observed pairs by user and by item via sorted boundaries
+        self.user_items_ = self._group_by(rows, cols, values, n_users)
+        item_items = self._group_by(cols, rows, values, n_items)
+
+        rng = np.random.default_rng(self.seed)
+        self.item_factors_ = (
+            rng.normal(0.0, 0.01, size=(n_items, n_factors)).astype(np.float32)
+        )
+        self.user_factors_ = np.zeros((n_users, n_factors), dtype=np.float32)
+
+        reg_eye = self.regularization * np.eye(n_factors, dtype=np.float32)
+        for iteration in range(self.iterations):
+            self.user_factors_ = self._als_pass(
+                self.user_items_, self.item_factors_, reg_eye, n_users
+            )
+            self.item_factors_ = self._als_pass(
+                item_items, self.user_factors_, reg_eye, n_items
+            )
+            if (iteration + 1) % 5 == 0 or iteration == 0:
+                logger.debug(f"ALS iteration {iteration + 1}/{self.iterations}")
+
+        self.seen_items_ = (
+            train_ratings.groupby("user_id")["movie_id"]
+            .apply(lambda movies: set(int(m) for m in movies))
+            .to_dict()
+        )
+        self.popularity_model_.fit(train_ratings)
+
+        logger.info(
+            f"ALSRecommender fitted: {n_items} items, {n_users} users, "
+            f"n_factors={n_factors}, alpha={self.alpha}, "
+            f"reg={self.regularization}, iterations={self.iterations}"
+        )
+
+    @staticmethod
+    def _group_by(
+        keys: np.ndarray,
+        partners: np.ndarray,
+        values: np.ndarray,
+        n_groups: int,
+    ) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+        """Group (partner, [confidence, preference]) pairs by key index.
+
+        Args:
+            keys: Group index per observed pair
+            partners: Partner index per observed pair
+            values: Confidence and preference per observed pair
+            n_groups: Total number of groups
+
+        Returns:
+            Mapping from group index to (partner indices, value rows)
+        """
+        order = np.argsort(keys, kind="stable")
+        sorted_keys = keys[order]
+        boundaries = np.searchsorted(sorted_keys, np.arange(n_groups + 1))
+        grouped: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for group_idx in range(n_groups):
+            start, end = boundaries[group_idx], boundaries[group_idx + 1]
+            idxs = order[start:end]
+            grouped[group_idx] = (partners[idxs], values[idxs])
+        return grouped
+
+    @staticmethod
+    def _als_pass(
+        groups: dict[int, tuple[np.ndarray, np.ndarray]],
+        fixed_factors: np.ndarray,
+        reg_eye: np.ndarray,
+        n_targets: int,
+    ) -> np.ndarray:
+        """Solve the closed-form least squares problem for every target.
+
+        Args:
+            groups: Mapping from index to (partner indices, [confidence, preference])
+            fixed_factors: Factors of the other side
+            reg_eye: Regularization term added to the normal equations
+            n_targets: Number of rows to solve for
+
+        Returns:
+            Factor matrix of shape (n_targets, n_factors)
+        """
+        n_factors = fixed_factors.shape[1]
+        solved = np.zeros((n_targets, n_factors), dtype=np.float32)
+        for target_idx in range(n_targets):
+            partner_idx, values = groups[target_idx]
+            if partner_idx.size == 0:
+                continue
+            confidence = values[:, 0]
+            preference = values[:, 1]
+            vectors = fixed_factors[partner_idx]
+            normal = reg_eye + (vectors * confidence[:, None]).T @ vectors
+            target = (vectors * (confidence * preference)[:, None]).sum(axis=0)
+            solved[target_idx] = np.linalg.solve(normal, target)
+        return solved
+
+    def recommend(self, user_id: int, k: int = 10) -> list[int]:
+        """Recommend top-K unseen items for a user.
+
+        Cold-start users (no training interactions) get popular items.
+
+        Args:
+            user_id: User ID to recommend for
+            k: Number of recommendations to return
+
+        Returns:
+            List of movie_ids (top-K recommendations)
+        """
+        user_idx = self.user_id_to_idx_.get(user_id)
+        if user_idx is None or self.user_factors_ is None:
+            return self.popularity_model_.recommend(user_id, k)
+
+        scores = self.user_factors_[user_idx] @ self.item_factors_.T
+        seen_items = self.seen_items_.get(user_id, set())
+        order = np.argsort(-scores)
+        recommendations: list[int] = []
+        for idx in order:
+            item_id = self.idx_to_item_id_[int(idx)]
+            if item_id in seen_items:
+                continue
+            recommendations.append(item_id)
+            if len(recommendations) == k:
+                break
+
+        if len(recommendations) < k:
+            fallback = self.popularity_model_.recommend(
+                user_id, k - len(recommendations)
+            )
+            recommendations = _fallback_extend(recommendations, seen_items, fallback)
+        return recommendations
+
+
 def main() -> None:
     """Run collaborative filtering evaluation on MovieLens 1M."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -474,8 +678,15 @@ def main() -> None:
     svd = SVDRecommender(n_factors=50)
     svd_metrics = _fit_and_evaluate(svd, train, test, "SVD")
 
+    als = ALSRecommender(n_factors=50)
+    als_metrics = _fit_and_evaluate(als, train, test, "ALS")
+
     best = max(
-        [("ItemItemKNN", knn_metrics), ("SVD", svd_metrics)],
+        [
+            ("ItemItemKNN", knn_metrics),
+            ("SVD", svd_metrics),
+            ("ALS", als_metrics),
+        ],
         key=lambda pair: pair[1]["precision_at_10"],
     )
     print(f"\nBest model: {best[0]} (Precision@10={best[1]['precision_at_10']:.4f})")

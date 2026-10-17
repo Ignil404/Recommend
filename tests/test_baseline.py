@@ -2,13 +2,17 @@
 Tests for baseline recommender models.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from src.models.baseline import (
     MeanRatingBaseline,
     PopularityBaseline,
+    average_precision_at_k,
     evaluate,
+    ndcg_at_k,
+    novelty_at_k,
     precision_at_k,
     recall_at_k,
     time_based_split,
@@ -76,6 +80,82 @@ class TestRecallAtK:
     def test_empty_relevant(self):
         """Empty relevant set returns 0."""
         assert recall_at_k([1, 2], set(), k=10) == 0.0
+
+
+class TestRankingMetrics:
+    """Tests for NDCG, MAP, and novelty metrics."""
+
+    def test_ndcg_perfect_ranking(self):
+        """Relevant items ranked first give NDCG 1.0."""
+        assert ndcg_at_k([1, 2, 3], {1, 2}, k=3) == pytest.approx(1.0)
+
+    def test_ndcg_discounts_lower_ranks(self):
+        """The same hit scores lower when it appears later."""
+        early = ndcg_at_k([5, 1, 2, 3], {5}, k=4)
+        late = ndcg_at_k([1, 2, 3, 5], {5}, k=4)
+        assert early > late
+        assert late > 0.0
+
+    def test_ndcg_no_hits(self):
+        """No relevant items in the list gives NDCG 0."""
+        assert ndcg_at_k([7, 8, 9], {1, 2}, k=3) == 0.0
+
+    def test_ndcg_empty_inputs(self):
+        """Empty recommendations or relevance set give 0."""
+        assert ndcg_at_k([], {1}, k=10) == 0.0
+        assert ndcg_at_k([1], set(), k=10) == 0.0
+        assert ndcg_at_k([1], {1}, k=0) == 0.0
+
+    def test_average_precision_hand_computed(self):
+        """AP with hits at ranks 1 and 3 of 2 relevant items."""
+        # AP = (1/1 + 2/3) / 2
+        assert average_precision_at_k([1, 2, 3], {1, 3}, k=3) == pytest.approx(
+            (1 + 2 / 3) / 2
+        )
+
+    def test_average_precision_perfect(self):
+        """All relevant items first give AP 1.0."""
+        assert average_precision_at_k([1, 2], {1, 2}, k=2) == pytest.approx(1.0)
+
+    def test_average_precision_empty_inputs(self):
+        """Empty recommendations or relevance set give 0."""
+        assert average_precision_at_k([], {1}, k=10) == 0.0
+        assert average_precision_at_k([1], set(), k=10) == 0.0
+
+    def test_novelty_prefers_obscure_items(self):
+        """Recommending a rare item scores higher than a popular one."""
+        popularity = {1: 90, 2: 10}
+        popular = novelty_at_k([1], popularity, total_ratings=100, k=1)
+        obscure = novelty_at_k([2], popularity, total_ratings=100, k=1)
+        assert obscure > popular
+        assert popular == pytest.approx(-np.log2(0.9))
+        assert obscure == pytest.approx(-np.log2(0.1))
+
+    def test_evaluate_reports_all_metrics(self):
+        """evaluate() exposes ranking, coverage and novelty metrics."""
+        train = pd.DataFrame({
+            "user_id": [1, 1, 2, 2, 3, 3],
+            "movie_id": [1, 2, 1, 3, 1, 4],
+            "rating": [4, 5, 3, 4, 5, 4],
+            "timestamp": [1000, 1001, 1002, 1003, 1004, 1005],
+        })
+        test = pd.DataFrame({
+            "user_id": [1, 2, 3],
+            "movie_id": [1, 1, 1],
+            "rating": [5, 4, 5],
+            "timestamp": [2000, 2001, 2002],
+        })
+
+        model = PopularityBaseline()
+        model.fit(train)
+        metrics = evaluate(model, train, test, k=1)
+
+        for key in ("ndcg_at_1", "map_at_1", "coverage", "novelty"):
+            assert key in metrics
+        assert metrics["ndcg_at_1"] == pytest.approx(1.0)
+        assert metrics["map_at_1"] == pytest.approx(1.0)
+        # Only the single most popular item is recommended to everyone
+        assert metrics["coverage"] == pytest.approx(1 / 4)
 
 
 class TestTimeBasedSplit:
