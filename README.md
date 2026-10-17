@@ -22,7 +22,10 @@ src/models/
   content_based.py        # TF-IDF item vectors + user profiles
   hybrid.py               # score = α·cosine + (1−α)·normalized popularity
   collaborative.py        # item-item KNN, truncated SVD, implicit ALS
+src/service/
+  app.py                  # FastAPI app: /health, /recommendations/{user_id}
 tests/                    # pytest suite
+.github/workflows/ci.yml  # CI: ruff + pytest + API smoke test
 ```
 
 ## Setup
@@ -59,6 +62,19 @@ jupyter nbconvert --to notebook --execute notebooks/02_models.ipynb
 
 # Reproduce the results table below
 python -m scripts.benchmark
+
+# Run the recommendation API (fits item-item KNN on startup, ~15 s)
+python -m src.service.app
+```
+
+API usage:
+
+```bash
+curl http://127.0.0.1:8000/health
+# {"status":"ok","model":"ItemItemKNNRecommender","n_users":6040,"n_items":3706}
+
+curl "http://127.0.0.1:8000/recommendations/1?k=3"
+# {"user_id":1,"known_user":true,"k":3,"items":[{"movie_id":1196,"title":"Star Wars: Episode V ..."}, ...]}
 ```
 
 ## Evaluation protocol
@@ -137,4 +153,5 @@ ruff check .              # lint
       all models
 - [x] Stage 6 — richer metrics (NDCG@K, MAP, coverage, novelty) + implicit-feedback
       ALS (documented negative result: item-item KNN still wins)
-- [ ] Stage 7 — serving (FastAPI) and CI
+- [x] Stage 7 — serving (FastAPI: /health + /recommendations with titles and
+      cold-start fallback) + GitHub Actions CI (ruff, pytest, API smoke test)

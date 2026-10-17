@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Download dataset
+        run: python scripts/download_movielens.py
+
+      - name: Test
+        run: pytest -q
+
+      - name: Smoke-test the API
+        run: |
+          python -m src.service.app &
+          SERVER_PID=$!
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8000/health && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8000/health
+          curl -sf "http://127.0.0.1:8000/recommendations/1?k=5"
+          kill $SERVER_PID
