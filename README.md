@@ -84,14 +84,21 @@ python -m scripts.benchmark
 | ContentBased | 0.0087 | 0.0024 | ~10 s |
 | Hybrid (α=0.2) | 0.1029 | 0.0378 | ~20 s |
 | ItemItemKNN (50 neighbours) | **0.1334** | **0.0608** | ~13 s |
+| CFHybrid (0.7 CF / 0.1 content / 0.2 pop) | 0.1297 | 0.0578 | ~19 s |
 
 Item-item KNN uses raw ratings (no per-user centering); `n_neighbors=50` is the
 best of a sweep over {5, 10, 20, 50, 100, 200, 400} (0.1233 → 0.1335, flat).
+CFHybrid weights come from `tune_cf_weights_on_val` on the validation split.
 
 Takeaways:
 - **Item-item KNN is the best model**: +29% Precision@10 and +61% Recall@10 over
   the content+popularity hybrid. Co-rating behaviour is a much stronger signal
   than item metadata on MovieLens 1M.
+- **Three-way blending does not help**: adding content and popularity weights on
+  top of CF (0.1297) is slightly worse than pure CF (0.1333). Co-rating
+  similarity already carries the popularity signal, and the content signal is
+  too weak to add anything. The validation-tuned weights (0.7/0.1) also did not
+  transfer to the test split.
 - **Centering ratings hurts** (0.1080 vs 0.1334): raw positive values make the
   cosine similarity carry the popularity signal that the temporal test set
   rewards.

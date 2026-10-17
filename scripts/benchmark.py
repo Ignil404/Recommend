@@ -18,12 +18,14 @@ from src.models.baseline import (
 )
 from src.models.collaborative import ItemItemKNNRecommender, SVDRecommender
 from src.models.content_based import ContentBasedRecommender
-from src.models.hybrid import HybridRecommender
+from src.models.hybrid import CFHybridRecommender, HybridRecommender
 
 DATA_DIR = "data/ml-1m"
 RATINGS_COLS = ["user_id", "movie_id", "rating", "timestamp"]
 K = 10
 BEST_ALPHA = 0.2
+# Tuned on the validation split by tune_cf_weights_on_val
+BEST_CF = (0.7, 0.1)
 
 
 def load_ratings() -> pd.DataFrame:
@@ -68,6 +70,12 @@ def main() -> None:
     run("SVD", SVDRecommender(n_factors=50), train, test)
     run("ContentBased", ContentBasedRecommender(min_rating_for_like=4.0), train, test)
     run(f"Hybrid(a={BEST_ALPHA})", HybridRecommender(alpha=BEST_ALPHA), train, test)
+    run(
+        f"CFHybrid(cf={BEST_CF[0]},c={BEST_CF[1]})",
+        CFHybridRecommender(cf_weight=BEST_CF[0], content_weight=BEST_CF[1]),
+        train,
+        test,
+    )
 
 
 if __name__ == "__main__":

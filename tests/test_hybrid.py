@@ -10,7 +10,12 @@ from src.models.baseline import (
     time_based_train_val_test_split,
 )
 from src.models.content_based import ContentBasedRecommender
-from src.models.hybrid import HybridRecommender, tune_alpha_on_val
+from src.models.hybrid import (
+    CFHybridRecommender,
+    HybridRecommender,
+    tune_alpha_on_val,
+    tune_cf_weights_on_val,
+)
 
 
 class TestHybridRecommender:
@@ -206,3 +211,85 @@ class TestTrainValTestSplit:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestCFHybridRecommender:
+    """Tests for the three-way CF + content + popularity hybrid (synthetic)."""
+
+    @pytest.fixture
+    def cluster_data(self):
+        """Clustered synthetic ratings plus the held-out item per user."""
+        from tests.test_collaborative import make_clustered_ratings
+
+        return make_clustered_ratings()
+
+    @pytest.fixture
+    def train(self, cluster_data):
+        """Training ratings."""
+        return cluster_data[0]
+
+    @pytest.fixture
+    def model(self, train):
+        """Fitted CF hybrid with balanced weights."""
+        model = CFHybridRecommender(
+            cf_weight=0.7, content_weight=0.2, n_neighbors=5
+        )
+        model.fit(train)
+        return model
+
+    def test_invalid_weights_rejected(self):
+        """Weights must be non-negative and sum to at most 1."""
+        with pytest.raises(ValueError):
+            CFHybridRecommender(cf_weight=0.8, content_weight=0.3)
+        with pytest.raises(ValueError):
+            CFHybridRecommender(cf_weight=-0.1, content_weight=0.0)
+
+    def test_ranks_held_out_item_first(self, model, cluster_data):
+        """The unseen same-cluster item must rank first for every weight mix."""
+        _, held_out = cluster_data
+        for cf_weight, content_weight in [(1.0, 0.0), (0.7, 0.2), (0.5, 0.5)]:
+            tuned = CFHybridRecommender(
+                cf_weight=cf_weight,
+                content_weight=content_weight,
+                n_neighbors=5,
+            )
+            tuned.fit(cluster_data[0])
+            assert tuned.recommend(1, k=1) == [held_out[1]]
+
+    def test_seen_items_excluded(self, model, train):
+        """Rated items must never be recommended."""
+        for user_id in [1, 11]:
+            seen = set(train[train["user_id"] == user_id]["movie_id"].tolist())
+            recs = model.recommend(user_id, k=3)
+            assert not any(item in seen for item in recs)
+
+    def test_cold_start_falls_back_to_popularity(self, model, train):
+        """Users without training data get popular items."""
+        popularity = PopularityBaseline()
+        popularity.fit(train)
+        assert model.recommend(999, k=5) == popularity.recommend(999, k=5)
+
+    def test_recommendations_are_python_ints(self, model):
+        """Recommendation lists must contain plain ints (serializable)."""
+        for item_id in model.recommend(1, k=3):
+            assert type(item_id) is int
+
+    def test_components_are_normalized(self, model):
+        """Each component is min-max normalized to [0, 1]."""
+        cf_scores, content_scores, popularity_scores = model._component_scores(1)
+        for scores in (cf_scores, content_scores, popularity_scores):
+            assert float(scores.min()) >= 0.0
+            assert float(scores.max()) <= 1.0
+
+    def test_tuning_returns_grid_member(self, train):
+        """Weight tuning picks a candidate from the grid and scores it."""
+        val = train.sample(frac=0.2, random_state=1)
+        best, results = tune_cf_weights_on_val(
+            train,
+            val,
+            cf_weights=(0.6, 1.0),
+            content_weights=(0.0, 0.3),
+            n_val_users=20,
+        )
+        assert best in {(0.6, 0.0), (0.6, 0.3), (1.0, 0.0)}
+        assert set(results) == {(0.6, 0.0), (0.6, 0.3), (1.0, 0.0)}
+        assert results[best] == max(results.values())

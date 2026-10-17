@@ -223,6 +223,42 @@ class ItemItemKNNRecommender(BaseRecommender):
                 group["rating"].to_numpy() - user_mean
             ).astype(np.float32)
 
+    def score_user(self, user_id: int) -> np.ndarray | None:
+        """Return raw CF scores for every item index of this model.
+
+        Args:
+            user_id: User ID to score
+
+        Returns:
+            Float array of length n_items, or None for cold-start users
+        """
+        user_idx = self.user_id_to_idx_.get(user_id)
+        if (
+            user_idx is None
+            or self.neighbor_idx_ is None
+            or user_idx not in self.user_item_indices_
+        ):
+            return None
+
+        scores = np.zeros(self.neighbor_idx_.shape[0], dtype=np.float32)
+        item_indices = self.user_item_indices_[user_idx]
+        weights = self.user_item_weights_[user_idx]
+        for item_idx, weight in zip(item_indices, weights):
+            scores[self.neighbor_idx_[item_idx]] += weight * self.neighbor_sim_[
+                item_idx
+            ]
+        return scores
+
+    def seen_item_ids(self, user_id: int) -> set[int]:
+        """Return the set of item IDs the user rated in training."""
+        user_idx = self.user_id_to_idx_.get(user_id)
+        if user_idx is None:
+            return set()
+        return {
+            self.idx_to_item_id_[idx]
+            for idx in self.user_seen_indices_.get(user_idx, [])
+        }
+
     def recommend(self, user_id: int, k: int = 10) -> list[int]:
         """Recommend top-K unseen items for a user.
 
@@ -235,26 +271,11 @@ class ItemItemKNNRecommender(BaseRecommender):
         Returns:
             List of movie_ids (top-K recommendations)
         """
-        user_idx = self.user_id_to_idx_.get(user_id)
-        if (
-            user_idx is None
-            or self.neighbor_idx_ is None
-            or user_idx not in self.user_item_indices_
-        ):
+        scores = self.score_user(user_id)
+        if scores is None:
             return self.popularity_model_.recommend(user_id, k)
 
-        scores = np.zeros(self.neighbor_idx_.shape[0], dtype=np.float32)
-        item_indices = self.user_item_indices_[user_idx]
-        weights = self.user_item_weights_[user_idx]
-        for item_idx, weight in zip(item_indices, weights):
-            scores[self.neighbor_idx_[item_idx]] += weight * self.neighbor_sim_[
-                item_idx
-            ]
-
-        seen = set(self.user_seen_indices_.get(user_idx, []))
-        seen_items = {
-            self.idx_to_item_id_[idx] for idx in seen
-        }
+        seen_items = self.seen_item_ids(user_id)
         order = np.argsort(-scores)
         recommendations: list[int] = []
         for idx in order:

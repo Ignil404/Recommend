@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 from src.models.baseline import BaseRecommender, PopularityBaseline
+from src.models.collaborative import ItemItemKNNRecommender
 from src.models.content_based import ContentBasedRecommender
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,272 @@ def tune_alpha_on_val(
             best_alpha = alpha
 
     return best_alpha, results
+
+
+def _minmax(scores: np.ndarray) -> np.ndarray:
+    """Min-max normalize a score vector to [0, 1] (zeros if constant)."""
+    hi = float(scores.max())
+    lo = float(scores.min())
+    if hi == lo:
+        return np.zeros_like(scores)
+    return (scores - lo) / (hi - lo)
+
+
+class CFHybridRecommender(BaseRecommender):
+    """Three-way hybrid: item-item CF + content cosine + popularity.
+
+    score = cf_weight * norm(cf) + content_weight * norm(content)
+            + (1 - cf_weight - content_weight) * norm(popularity)
+
+    Every component is min-max normalized on the item index space of the
+    collaborative model, so the weights are directly comparable. Components are
+    fitted once and reused, which makes weight tuning cheap.
+    """
+
+    def __init__(
+        self,
+        cf_weight: float = 0.7,
+        content_weight: float = 0.2,
+        n_neighbors: int = 50,
+        min_rating_for_like: float = 4.0,
+        tfidf_max_features: int = 100,
+        tfidf_ngram_range: tuple[int, int] = (1, 2),
+    ) -> None:
+        if cf_weight < 0 or content_weight < 0 or cf_weight + content_weight > 1:
+            raise ValueError("weights must be non-negative and sum to at most 1")
+        self.cf_weight = cf_weight
+        self.content_weight = content_weight
+        self.popularity_weight = 1.0 - cf_weight - content_weight
+        self.n_neighbors = n_neighbors
+        self.min_rating_for_like = min_rating_for_like
+        self.tfidf_max_features = tfidf_max_features
+        self.tfidf_ngram_range = tfidf_ngram_range
+
+        # Fitted components
+        self.cf_model_: ItemItemKNNRecommender | None = None
+        self.content_model_: ContentBasedRecommender | None = None
+        self.popularity_model_: PopularityBaseline = PopularityBaseline()
+        self.popularity_scores_: np.ndarray | None = None
+        self.content_to_cf_idx_: np.ndarray | None = None
+
+    def fit(self, train_ratings: pd.DataFrame, data_dir: str = "data/ml-1m") -> None:
+        """Fit all three components on training data.
+
+        Args:
+            train_ratings: DataFrame with columns [user_id, movie_id, rating, timestamp]
+            data_dir: Directory containing movies.dat, users.dat, ratings.dat
+        """
+        self.cf_model_ = ItemItemKNNRecommender(
+            n_neighbors=self.n_neighbors,
+            min_rating_for_like=self.min_rating_for_like,
+        )
+        self.cf_model_.fit(train_ratings)
+
+        self.content_model_ = ContentBasedRecommender(
+            min_rating_for_like=self.min_rating_for_like,
+            tfidf_max_features=self.tfidf_max_features,
+            tfidf_ngram_range=self.tfidf_ngram_range,
+        )
+        self.content_model_.fit(train_ratings, data_dir=data_dir)
+
+        self.popularity_model_.fit(train_ratings)
+        self._build_component_vectors(train_ratings)
+
+        logger.info(
+            f"CFHybridRecommender fitted: cf_weight={self.cf_weight}, "
+            f"content_weight={self.content_weight}, "
+            f"popularity_weight={self.popularity_weight:.2f}"
+        )
+
+    def _build_component_vectors(self, train_ratings: pd.DataFrame) -> None:
+        """Build popularity scores and the content-to-CF item index mapping."""
+        assert self.cf_model_ is not None
+        cf = self.cf_model_
+        n_items = len(cf.item_id_to_idx_)
+
+        # Popularity component (min-max normalized counts)
+        counts = train_ratings.groupby("movie_id").size()
+        popularity = np.zeros(n_items, dtype=np.float32)
+        for item_id, count in counts.items():
+            popularity[cf.item_id_to_idx_[item_id]] = count
+        self.popularity_scores_ = _minmax(popularity)
+
+        # Content items are a subset of training items: map their indices
+        content = self.content_model_
+        self.content_to_cf_idx_ = np.array(
+            [
+                cf.item_id_to_idx_[content.idx_to_item_id_[idx]]
+                for idx in range(len(content.idx_to_item_id_))
+            ],
+            dtype=np.int64,
+        )
+
+    def _component_scores(self, user_id: int) -> tuple[np.ndarray, ...] | None:
+        """Return normalized (cf, content, popularity) scores for a user.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            Tuple of three float arrays over the CF item index space, or None
+            for cold-start users
+        """
+        assert self.cf_model_ is not None
+        assert self.content_model_ is not None
+
+        cf_scores = self.cf_model_.score_user(user_id)
+        if cf_scores is None:
+            return None
+
+        profile = self.content_model_.user_profiles_.get(user_id)
+        content_scores = np.zeros_like(cf_scores)
+        if profile is not None:
+            sims = cosine_similarity(
+                profile.reshape(1, -1), self.content_model_.item_vectors_
+            ).flatten()
+            content_scores[self.content_to_cf_idx_] = sims
+
+        return (
+            _minmax(cf_scores),
+            _minmax(content_scores),
+            self.popularity_scores_,
+        )
+
+    def recommend(self, user_id: int, k: int = 10) -> list[int]:
+        """Recommend top-K unseen items by the blended score.
+
+        Cold-start users fall back to popularity.
+
+        Args:
+            user_id: User ID to recommend for
+            k: Number of recommendations to return
+
+        Returns:
+            List of movie_ids (top-K recommendations)
+        """
+        assert self.cf_model_ is not None
+        components = self._component_scores(user_id)
+        if components is None:
+            return self.popularity_model_.recommend(user_id, k)
+
+        cf_scores, content_scores, popularity_scores = components
+        scores = (
+            self.cf_weight * cf_scores
+            + self.content_weight * content_scores
+            + self.popularity_weight * popularity_scores
+        )
+
+        seen_items = self.cf_model_.seen_item_ids(user_id)
+        order = np.argsort(-scores)
+        recommendations: list[int] = []
+        for idx in order:
+            item_id = self.cf_model_.idx_to_item_id_[int(idx)]
+            if item_id in seen_items:
+                continue
+            recommendations.append(item_id)
+            if len(recommendations) == k:
+                break
+
+        if len(recommendations) < k:
+            fallback = self.popularity_model_.recommend(
+                user_id, k - len(recommendations)
+            )
+            existing = set(recommendations) | seen_items
+            for item_id in fallback:
+                if item_id in existing:
+                    continue
+                recommendations.append(item_id)
+                existing.add(item_id)
+        return recommendations
+
+
+def tune_cf_weights_on_val(
+    train_ratings: pd.DataFrame,
+    val_ratings: pd.DataFrame,
+    cf_weights: tuple[float, ...] = (0.5, 0.6, 0.7, 0.8, 0.9),
+    content_weights: tuple[float, ...] = (0.0, 0.05, 0.1, 0.2, 0.3),
+    k: int = 10,
+    n_val_users: int = 800,
+    data_dir: str = "data/ml-1m",
+    seed: int = 42,
+) -> tuple[tuple[float, float], dict]:
+    """Tune (cf_weight, content_weight) on validation by Precision@10.
+
+    Components are fitted once; the weight grid is applied to cached per-user
+    score vectors, so the grid does not multiply fitting cost. Validation users
+    are subsampled for speed.
+
+    Args:
+        train_ratings: Training data
+        val_ratings: Validation data (all held-out items count as relevant,
+            matching evaluate())
+        cf_weights: Candidate item-item CF weights
+        content_weights: Candidate content weights (popularity gets the rest)
+        k: Cutoff for metrics
+        n_val_users: Number of validation users to score
+        data_dir: Directory containing movies.dat
+        seed: Random seed for the user subsample
+
+    Returns:
+        Tuple of ((best_cf_weight, best_content_weight), results_dict)
+    """
+    model = CFHybridRecommender(cf_weight=1.0, content_weight=0.0)
+    model.fit(train_ratings, data_dir=data_dir)
+    assert model.cf_model_ is not None
+
+    val_relevant = val_ratings.groupby("user_id")["movie_id"].apply(set).to_dict()
+    candidates = [
+        user_id
+        for user_id in val_relevant
+        if model.cf_model_.user_id_to_idx_.get(user_id) is not None
+    ]
+    rng = np.random.default_rng(seed)
+    sample = list(
+        rng.choice(candidates, size=min(n_val_users, len(candidates)), replace=False)
+    )
+
+    # Cache normalized component scores for the sampled users
+    cached: list[tuple[set[int], tuple[np.ndarray, ...]]] = []
+    for user_id in sample:
+        components = model._component_scores(int(user_id))
+        if components is None:
+            continue
+        cached.append((val_relevant[int(user_id)], components))
+
+    results: dict[tuple[float, float], float] = {}
+    best = (0.0, 0.0)
+    best_precision = -1.0
+    for cf_weight in cf_weights:
+        for content_weight in content_weights:
+            if cf_weight + content_weight > 1:
+                continue
+            popularity_weight = 1.0 - cf_weight - content_weight
+            precisions = []
+            for relevant, (cf_scores, content_scores, popularity_scores) in cached:
+                scores = (
+                    cf_weight * cf_scores
+                    + content_weight * content_scores
+                    + popularity_weight * popularity_scores
+                )
+                top = np.argpartition(-scores, k)[:k]
+                hits = sum(
+                    1
+                    for idx in top
+                    if model.cf_model_.idx_to_item_id_[int(idx)] in relevant
+                )
+                precisions.append(hits / k)
+            precision = float(np.mean(precisions)) if precisions else 0.0
+            results[(cf_weight, content_weight)] = precision
+            if precision > best_precision:
+                best_precision = precision
+                best = (cf_weight, content_weight)
+
+    logger.info(
+        f"Best CF hybrid weights: cf={best[0]}, content={best[1]} "
+        f"(validation Precision@{k}={best_precision:.4f} "
+        f"on {len(cached)} users)"
+    )
+    return best, results
 
 
 def main() -> None:

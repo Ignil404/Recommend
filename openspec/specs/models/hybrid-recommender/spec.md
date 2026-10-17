@@ -43,6 +43,32 @@ train/val/test partition per user, and report test metrics for the best alpha.
 - **THEN** no validation interaction precedes a training interaction for the
   same user
 
+### Requirement: Three-way CF hybrid
+The system SHALL combine item-item collaborative filtering, content-based
+cosine similarity, and popularity in a single score with tunable weights:
+
+`cf_weight * norm(cf) + content_weight * norm(content) + popularity_weight * norm(popularity)`
+
+where every component is min-max normalized per user and the weights are
+non-negative and sum to at most 1.
+
+#### Scenario: Invalid weights rejected
+- **WHEN** the model is constructed with negative weights or weights summing
+  over 1
+- **THEN** a `ValueError` is raised
+
+#### Scenario: Weight tuning on validation
+- **WHEN** `tune_cf_weights_on_val` runs
+- **THEN** components are fitted once, the weight grid is applied to cached
+  per-user score vectors, and the best pair by validation Precision@10 is
+  returned
+
+#### Scenario: Known result — blending does not beat pure CF
+- **WHEN** the tuned weights (0.7 CF / 0.1 content / 0.2 popularity) are
+  evaluated on the temporal test split
+- **THEN** Precision@10 is 0.1297, below pure item-item CF at 0.1333, because
+  co-rating similarity already carries the popularity signal
+
 ### Requirement: Cold-start fallback
 The system SHALL fall back to popularity for users with no liked training items.
 
