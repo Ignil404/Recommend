@@ -147,7 +147,9 @@ class TestTimeBasedSplit:
         data = []
         # User 1: 5 interactions
         for i in range(5):
-            data.append({"user_id": 1, "movie_id": i, "rating": 4.0, "timestamp": 1000 + i})
+            data.append(
+                {"user_id": 1, "movie_id": i, "rating": 4.0, "timestamp": 1000 + i}
+            )
         # User 2: only 1 interaction - should go to train (minimum 1 train item)
         data.append({"user_id": 2, "movie_id": 10, "rating": 4.0, "timestamp": 2000})
 

@@ -63,7 +63,10 @@ class PopularityBaseline(BaseRecommender):
             key=lambda x: self.item_popularity_[x],
             reverse=True,
         )
-        logger.info(f"PopularityBaseline fitted on {len(train_ratings)} ratings, {len(self.popular_items_)} items")
+        logger.info(
+            f"PopularityBaseline fitted on {len(train_ratings)} ratings, "
+            f"{len(self.popular_items_)} items"
+        )
 
     def recommend(self, user_id: int, k: int = 10) -> list[int]:
         """Return top-K popular items (same for all users).
@@ -103,7 +106,8 @@ class MeanRatingBaseline(BaseRecommender):
 
         # Item means (only for items with sufficient ratings)
         item_stats = train_ratings.groupby("movie_id")["rating"].agg(["mean", "count"])
-        self.item_means_ = item_stats[item_stats["count"] >= self.min_ratings]["mean"].to_dict()
+        sufficient = item_stats[item_stats["count"] >= self.min_ratings]
+        self.item_means_ = sufficient["mean"].to_dict()
 
         # User means
         self.user_means_ = train_ratings.groupby("user_id")["rating"].mean().to_dict()
@@ -180,7 +184,10 @@ class RandomRecommender(BaseRecommender):
             train_ratings: DataFrame with columns [user_id, movie_id, rating, timestamp]
         """
         self.item_pool_ = train_ratings["movie_id"].unique().tolist()
-        logger.info(f"RandomRecommender fitted on {len(train_ratings)} ratings, {len(self.item_pool_)} items")
+        logger.info(
+            f"RandomRecommender fitted on {len(train_ratings)} ratings, "
+            f"{len(self.item_pool_)} items"
+        )
 
     def recommend(self, user_id: int, k: int = 10) -> list[int]:
         """Return K random items from the pool.
@@ -266,7 +273,7 @@ def _time_based_split_impl(
     Args:
         ratings: DataFrame with columns [user_id, movie_id, rating, timestamp]
         test_ratio: Fraction of interactions per user to use as test
-        val_ratio: Fraction of interactions per user to use as val (0 for train/test only)
+        val_ratio: Fraction of per-user interactions used as val (0 = no val set)
         timestamp_col: Name of timestamp column
         user_col: Name of user ID column
 
@@ -315,7 +322,9 @@ def _time_based_split_impl(
         # Verify val doesn't overlap with test in time
         verify_no_leakage(val_df, test_df, user_col, timestamp_col, allow_boundary=True)
         # Verify train doesn't overlap with val in time
-        verify_no_leakage(train_df, val_df, user_col, timestamp_col, allow_boundary=True)
+        verify_no_leakage(
+            train_df, val_df, user_col, timestamp_col, allow_boundary=True
+        )
         return train_df, val_df, test_df
 
     return train_df, test_df
@@ -450,7 +459,10 @@ def evaluate(
     macro_precision = np.mean(precisions) if precisions else 0.0
     macro_recall = np.mean(recalls) if recalls else 0.0
 
-    logger.info(f"Evaluation (k={k}): Precision@{k}={macro_precision:.4f}, Recall@{k}={macro_recall:.4f}")
+    logger.info(
+        f"Evaluation (k={k}): Precision@{k}={macro_precision:.4f}, "
+        f"Recall@{k}={macro_recall:.4f}"
+    )
     logger.info(f"Evaluated on {len(test_users)} users")
 
     return {
@@ -475,7 +487,10 @@ def main() -> None:
         encoding="latin-1",
     )
 
-    print(f"Loaded {len(ratings)} ratings from {ratings['user_id'].nunique()} users and {ratings['movie_id'].nunique()} movies")
+    print(
+        f"Loaded {len(ratings)} ratings from {ratings['user_id'].nunique()} users "
+        f"and {ratings['movie_id'].nunique()} movies"
+    )
 
     # Time-based split
     train, test = time_based_split(ratings, test_ratio=0.2)

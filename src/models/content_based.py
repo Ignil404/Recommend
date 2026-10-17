@@ -129,10 +129,10 @@ class ContentBasedRecommender(BaseRecommender):
         # Fit popularity fallback for cold-start
         self.popularity_fallback_.fit(train_ratings)
 
+        vec_dim = self.item_vectors_.shape[1] if self.item_vectors_ is not None else 0
         logger.info(
             f"ContentBasedRecommender fitted: {len(self.item_id_to_idx_)} items, "
-            f"{len(self.user_profiles_)} user profiles, "
-            f"item vector dim={self.item_vectors_.shape[1] if self.item_vectors_ is not None else 0}"
+            f"{len(self.user_profiles_)} user profiles, item vector dim={vec_dim}"
         )
 
     def _build_item_features(self) -> None:
@@ -162,7 +162,9 @@ class ContentBasedRecommender(BaseRecommender):
             ngram_range=self.tfidf_ngram_range,
             lowercase=True,
         )
-        tfidf_features = self.tfidf_vectorizer_.fit_transform(movies["genre_text"]).toarray()
+        tfidf_features = (
+            self.tfidf_vectorizer_.fit_transform(movies["genre_text"]).toarray()
+        )
 
         # Combine all features
         combined_features = np.hstack([genre_features, decade_features, tfidf_features])
@@ -175,13 +177,18 @@ class ContentBasedRecommender(BaseRecommender):
         self.idx_to_item_id_ = {i: row["movie_id"] for i, row in movies.iterrows()}
 
         # Subset features to training items only
-        train_indices = [self.item_id_to_idx_[mid] for mid in sorted(self.item_id_to_idx_.keys())]
+        train_indices = [
+            self.item_id_to_idx_[mid] for mid in sorted(self.item_id_to_idx_.keys())
+        ]
         self.item_vectors_ = combined_features[train_indices]
 
         # Compute item-item cosine similarity matrix
         self.similarity_matrix_ = cosine_similarity(self.item_vectors_)
 
-        logger.debug(f"Item features: genres={genre_features.shape[1]}, decades={decade_features.shape[1]}, tfidf={tfidf_features.shape[1]}")
+        logger.debug(
+            f"Item features: genres={genre_features.shape[1]}, "
+            f"decades={decade_features.shape[1]}, tfidf={tfidf_features.shape[1]}"
+        )
 
     def _build_user_profiles(self) -> None:
         """Build user profiles as rating-weighted mean of liked item vectors.
@@ -192,7 +199,8 @@ class ContentBasedRecommender(BaseRecommender):
         assert self.item_vectors_ is not None
 
         # Filter to liked items (rating >= threshold)
-        liked = self.train_ratings_[self.train_ratings_["rating"] >= self.min_rating_for_like]
+        liked_mask = self.train_ratings_["rating"] >= self.min_rating_for_like
+        liked = self.train_ratings_[liked_mask]
 
         if liked.empty:
             logger.warning("No liked items found in training data")
@@ -248,9 +256,9 @@ class ContentBasedRecommender(BaseRecommender):
         # Get items user has already seen in training
         seen_items: set[int] = set()
         if self.train_ratings_ is not None:
-            seen_items = set(
-                self.train_ratings_[self.train_ratings_["user_id"] == user_id]["movie_id"].tolist()
-            )
+            user_ratings = self.train_ratings_
+            user_movies = user_ratings[user_ratings["user_id"] == user_id]
+            seen_items = set(user_movies["movie_id"].tolist())
 
         # Sort items by similarity, excluding seen
         item_indices = np.argsort(item_sims)[::-1]  # Descending
@@ -265,7 +273,8 @@ class ContentBasedRecommender(BaseRecommender):
 
         # If not enough unseen items, pad with popularity fallback
         if len(recommendations) < k:
-            fallback = self.popularity_fallback_.recommend(user_id, k - len(recommendations))
+            n_needed = k - len(recommendations)
+            fallback = self.popularity_fallback_.recommend(user_id, n_needed)
             for item_id in fallback:
                 if item_id not in seen_items and item_id not in recommendations:
                     recommendations.append(item_id)
@@ -326,7 +335,10 @@ def main() -> None:
         encoding="latin-1",
     )
 
-    print(f"Loaded {len(ratings)} ratings from {ratings['user_id'].nunique()} users and {ratings['movie_id'].nunique()} movies")
+    print(
+        f"Loaded {len(ratings)} ratings from {ratings['user_id'].nunique()} users "
+        f"and {ratings['movie_id'].nunique()} movies"
+    )
 
     # Time-based split
     train, test = time_based_split(ratings, test_ratio=0.2)

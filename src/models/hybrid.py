@@ -63,7 +63,7 @@ class HybridRecommender(BaseRecommender):
         """
         self.train_ratings_ = train_ratings.copy()
 
-        # Fit content-based model (builds item vectors and user profiles with raw weights)
+        # Fit content-based model (item vectors + user profiles, raw weights)
         self.content_model.fit(train_ratings, data_dir=data_dir)
 
         # Store original content-based user profiles for alpha=1.0
@@ -137,7 +137,8 @@ class HybridRecommender(BaseRecommender):
             user_profile = np.average(item_vecs, axis=0, weights=weights)
             self.content_model.user_profiles_[user_id] = user_profile
 
-        logger.debug(f"Built centered profiles for {len(self.content_model.user_profiles_)} users")
+        n_profiles = len(self.content_model.user_profiles_)
+        logger.debug(f"Built centered profiles for {n_profiles} users")
 
     def _normalize_popularity(self, item_id: int) -> float:
         """Min-max normalize popularity for an item."""
@@ -185,14 +186,16 @@ class HybridRecommender(BaseRecommender):
         user_profile = self.content_model.user_profiles_[user_id].reshape(1, -1)
 
         # Compute cosine similarity to all items
-        cosine_sims = cosine_similarity(user_profile, self.content_model.item_vectors_).flatten()
+        cosine_sims = cosine_similarity(
+            user_profile, self.content_model.item_vectors_
+        ).flatten()
 
         # Get items user has already seen in training
         seen_items: set[int] = set()
         if self.train_ratings_ is not None:
-            seen_items = set(
-                self.train_ratings_[self.train_ratings_["user_id"] == user_id]["movie_id"].tolist()
-            )
+            user_ratings = self.train_ratings_
+            user_movies = user_ratings[user_ratings["user_id"] == user_id]
+            seen_items = set(user_movies["movie_id"].tolist())
 
         # Compute hybrid scores for all items
         hybrid_scores = {}
@@ -201,16 +204,21 @@ class HybridRecommender(BaseRecommender):
                 continue
             cosine_score = cosine_sims[idx]
             popularity_score = self._normalize_popularity(item_id)
-            hybrid_scores[item_id] = self.alpha * cosine_score + (1 - self.alpha) * popularity_score
+            hybrid_scores[item_id] = (
+                self.alpha * cosine_score + (1 - self.alpha) * popularity_score
+            )
 
         # Sort by hybrid score (descending)
-        sorted_items = sorted(hybrid_scores.keys(), key=lambda x: hybrid_scores[x], reverse=True)
+        sorted_items = sorted(
+            hybrid_scores.keys(), key=lambda x: hybrid_scores[x], reverse=True
+        )
 
         recommendations = sorted_items[:k]
 
         # If not enough items, pad with popularity fallback
         if len(recommendations) < k:
-            fallback = self.popularity_model.recommend(user_id, k - len(recommendations))
+            n_needed = k - len(recommendations)
+            fallback = self.popularity_model.recommend(user_id, n_needed)
             for item_id in fallback:
                 if item_id not in seen_items and item_id not in recommendations:
                     recommendations.append(item_id)
@@ -282,7 +290,10 @@ def main() -> None:
         encoding="latin-1",
     )
 
-    print(f"Loaded {len(ratings)} ratings from {ratings['user_id'].nunique()} users and {ratings['movie_id'].nunique()} movies")
+    print(
+        f"Loaded {len(ratings)} ratings from {ratings['user_id'].nunique()} users "
+        f"and {ratings['movie_id'].nunique()} movies"
+    )
 
     # Time-based train/val/test split
     train, val, test = time_based_train_val_test_split(
@@ -293,13 +304,18 @@ def main() -> None:
     # Tune alpha on validation set
     print("\n--- Tuning alpha on validation set ---")
     alphas = [round(i * 0.1, 1) for i in range(11)]
-    best_alpha, results = tune_alpha_on_val(train, val, alphas=alphas, k=10, data_dir=data_dir)
+    best_alpha, results = tune_alpha_on_val(
+        train, val, alphas=alphas, k=10, data_dir=data_dir
+    )
 
     print("\nValidation curve (alpha, P@10, R@10):")
     for alpha in alphas:
         r = results[alpha]
         marker = " *" if alpha == best_alpha else ""
-        print(f"  alpha={alpha:.1f}: P@10={r['precision_at_10']:.4f}, R@10={r['recall_at_10']:.4f}{marker}")
+        print(
+            f"  alpha={alpha:.1f}: P@10={r['precision_at_10']:.4f}, "
+            f"R@10={r['recall_at_10']:.4f}{marker}"
+        )
 
     # Evaluate best alpha on test set
     print(f"\n--- Best alpha = {best_alpha} on test set ---")

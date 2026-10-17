@@ -16,9 +16,18 @@ from tqdm import tqdm
 # Official MovieLens 1M dataset info
 ML1M_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
 EXPECTED_FILES: dict[str, tuple[int, str]] = {
-    "ml-1m/ratings.dat": (24594131, "506d64ca44484487c11dc2d9a28de5c54948213e6b96285e298afe28d6ea4e0f"),
-    "ml-1m/users.dat": (134368, "1dc3a95300cb19f7c10e027daf29b8cdf1d908dab65b5edfb45950aa389a10a3"),
-    "ml-1m/movies.dat": (171308, "0140fc2356357c1a851d0f52e893a1e4d3696df632c4141cea8d5bc3d621f0b9"),
+    "ml-1m/ratings.dat": (
+        24594131,
+        "506d64ca44484487c11dc2d9a28de5c54948213e6b96285e298afe28d6ea4e0f",
+    ),
+    "ml-1m/users.dat": (
+        134368,
+        "1dc3a95300cb19f7c10e027daf29b8cdf1d908dab65b5edfb45950aa389a10a3",
+    ),
+    "ml-1m/movies.dat": (
+        171308,
+        "0140fc2356357c1a851d0f52e893a1e4d3696df632c4141cea8d5bc3d621f0b9",
+    ),
 }
 
 DATA_DIR = Path("data")
@@ -42,7 +51,10 @@ def verify_files() -> bool:
         if not filepath.exists():
             return False
         if filepath.stat().st_size != expected_size:
-            print(f"Size mismatch for {rel_path}: {filepath.stat().st_size} != {expected_size}")
+            print(
+                f"Size mismatch for {rel_path}: "
+                f"{filepath.stat().st_size} != {expected_size}"
+            )
             return False
         actual_hash = compute_sha256(filepath)
         if actual_hash != expected_hash:
@@ -62,7 +74,11 @@ def download_with_progress(url: str, dest: Path) -> None:
     response = requests.get(url, headers=headers, stream=True, timeout=30)
     response.raise_for_status()
 
-    total_size = int(response.headers.get("Content-Length", 0)) + dest.stat().st_size if dest.exists() else int(response.headers.get("Content-Length", 0))
+    content_length = int(response.headers.get("Content-Length", 0))
+    if dest.exists():
+        total_size = content_length + dest.stat().st_size
+    else:
+        total_size = content_length
     mode = "ab" if dest.exists() else "wb"
 
     with open(dest, mode) as f, tqdm(

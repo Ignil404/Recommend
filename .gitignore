@@ -29,3 +29,8 @@ env/
 
 # Notebooks
 notebooks/*_executed.ipynb
+
+# Build artifacts
+*.egg-info/
+build/
+dist/
