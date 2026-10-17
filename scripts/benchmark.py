@@ -16,6 +16,7 @@ from src.models.baseline import (
     evaluate,
     time_based_split,
 )
+from src.models.collaborative import ItemItemKNNRecommender, SVDRecommender
 from src.models.content_based import ContentBasedRecommender
 from src.models.hybrid import HybridRecommender
 
@@ -63,6 +64,8 @@ def main() -> None:
     run("Random", RandomRecommender(seed=42), train, test)
     run("Popularity", PopularityBaseline(), train, test)
     run("MeanRating", MeanRatingBaseline(min_ratings=5), train, test)
+    run("ItemItemKNN", ItemItemKNNRecommender(n_neighbors=50), train, test)
+    run("SVD", SVDRecommender(n_factors=50), train, test)
     run("ContentBased", ContentBasedRecommender(min_rating_for_like=4.0), train, test)
     run(f"Hybrid(a={BEST_ALPHA})", HybridRecommender(alpha=BEST_ALPHA), train, test)
 

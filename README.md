@@ -1,7 +1,7 @@
 # recomendation
 
-MovieLens 1M recommender system — from EDA to hybrid (content-based + popularity) models,
-with temporal evaluation and an OpenSpec-driven spec workflow.
+MovieLens 1M recommender system — from EDA to hybrid and collaborative
+filtering models, with temporal evaluation and an OpenSpec-driven spec workflow.
 
 ## Project structure
 
@@ -10,9 +10,9 @@ data/ml-1m/               # MovieLens 1M (downloaded, git-ignored)
 notebooks/
   01_eda.ipynb            # Exploratory data analysis
   01_eda_executed.ipynb   # Executed EDA
-  02_models.ipynb         # Comparison of all 5 models + alpha tuning
+  02_models.ipynb         # Comparison of all 7 models + alpha tuning
 openspec/
-  specs/                  # Specs: data-ingestion, eda, models
+  specs/                  # Specs: data-ingestion, eda, models/*
   changes/                # Active changes (archive/ holds finished ones)
 scripts/
   download_movielens.py   # Download + SHA256-verified dataset fetch
@@ -21,6 +21,7 @@ src/models/
   baseline.py             # Random, Popularity, MeanRating + splits/metrics
   content_based.py        # TF-IDF item vectors + user profiles
   hybrid.py               # score = α·cosine + (1−α)·normalized popularity
+  collaborative.py        # item-item KNN + truncated SVD latent factors
 tests/                    # pytest suite
 ```
 
@@ -50,6 +51,9 @@ python -m src.models.content_based
 # Hybrid recommender with alpha tuning on the validation set
 python -m src.models.hybrid
 
+# Collaborative filtering (item-item KNN + truncated SVD)
+python -m src.models.collaborative
+
 # Full model comparison
 jupyter nbconvert --to notebook --execute notebooks/02_models.ipynb
 
@@ -73,21 +77,30 @@ python -m scripts.benchmark
 
 | Model | Precision@10 | Recall@10 | Fit+eval time |
 |---|---|---|---|
-| Random | 0.0090 | 0.0028 | ~2 s |
+| Random | 0.0090 | 0.0028 | ~1 s |
 | Popularity | 0.0433 | 0.0227 | <1 s |
-| MeanRating | 0.0174 | 0.0075 | ~13 s |
-| ContentBased | 0.0087 | 0.0024 | ~30 s |
-| Hybrid (α=0.2) | **0.1029** | **0.0378** | ~75 s |
+| MeanRating | 0.0174 | 0.0075 | ~4 s |
+| SVD (50 factors) | 0.0031 | 0.0003 | ~2 s |
+| ContentBased | 0.0087 | 0.0024 | ~10 s |
+| Hybrid (α=0.2) | 0.1029 | 0.0378 | ~20 s |
+| ItemItemKNN (50 neighbours) | **0.1334** | **0.0608** | ~13 s |
 
-Best α = 0.2, tuned on a separate validation split by Precision@10.
+Item-item KNN uses raw ratings (no per-user centering); `n_neighbors=50` is the
+best of a sweep over {5, 10, 20, 50, 100, 200, 400} (0.1233 → 0.1335, flat).
 
 Takeaways:
-- Content-based alone is worse than the popularity baseline — sparse TF-IDF
-  features over genres/title/year are not enough signal.
-- Combining it with popularity (α=0.2) more than doubles Popularity's P@10;
-  the two signals are complementary.
-- Absolute numbers are low because only liked items (rating ≥ 4) in the held-out
-  tail are relevant — expected for a 10-item cutoff on 3 700+ movies.
+- **Item-item KNN is the best model**: +29% Precision@10 and +61% Recall@10 over
+  the content+popularity hybrid. Co-rating behaviour is a much stronger signal
+  than item metadata on MovieLens 1M.
+- **Centering ratings hurts** (0.1080 vs 0.1334): raw positive values make the
+  cosine similarity carry the popularity signal that the temporal test set
+  rewards.
+- **SVD is the worst model despite the best fit** (train RMSE 0.78): ranking by
+  predicted rating surfaces obscure items with 1-2 training ratings instead of
+  broadly liked ones. Optimizing RMSE does not optimize top-N ranking —
+  implicit-feedback models (ALS on binary interactions) are the fix.
+- Content-based alone is worse than the popularity baseline; its signal only
+  helps when blended with popularity (α=0.2).
 
 ## Quality checks
 
@@ -103,6 +116,8 @@ ruff check .              # lint
 - [x] Stage 2 — EDA + spec
 - [x] Stage 3 — baselines (Popularity / MeanRating / Random) + temporal split + metrics
 - [x] Stage 4 — content-based and hybrid models with α tuning
-- [ ] Stage 5 — collaborative filtering (item-item KNN, matrix factorization)
-- [ ] Stage 6 — richer metrics (NDCG@K, MAP, coverage/diversity) + unified benchmark
+- [x] Stage 5 — collaborative filtering (item-item KNN, truncated SVD) + specs for
+      all models
+- [ ] Stage 6 — richer metrics (NDCG@K, MAP, coverage/diversity), ranking-aware
+      matrix factorization (implicit-feedback ALS)
 - [ ] Stage 7 — serving (FastAPI) and CI
