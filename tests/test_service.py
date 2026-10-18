@@ -7,7 +7,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.models.collaborative import ItemItemKNNRecommender
-from src.service.app import create_app
+from src.service.app import (
+    create_app,
+    ensure_model,
+    load_model,
+    save_model,
+)
 from tests.test_collaborative import make_clustered_ratings
 
 
@@ -96,12 +101,76 @@ class TestRecommendationsEndpoint:
 
 
 class TestStartupFitting:
-    """Tests for the default startup path (model fitted during lifespan)."""
+    """Tests for the default startup path (artifact load / model fitting)."""
 
-    def test_model_is_fitted_on_startup(self, service_data):
+    def test_model_is_fitted_on_startup(self, service_data, tmp_path):
         ratings, _, movies = service_data
-        app = create_app(ratings=ratings, movies=movies)
+        artifact = tmp_path / "model.joblib"
+        app = create_app(ratings=ratings, movies=movies, path=artifact)
         with TestClient(app) as test_client:
             payload = test_client.get("/health").json()
             assert payload["model"] == "ItemItemKNNRecommender"
             assert payload["n_users"] == 40
+        # First startup fits the model and persists the artifact
+        assert artifact.exists()
+
+    def test_startup_loads_existing_artifact(self, service_data, tmp_path):
+        ratings, _, movies = service_data
+        artifact = tmp_path / "model.joblib"
+        # Pre-built artifact from other ratings must be preferred over `ratings`
+        other, _ = make_clustered_ratings(n_users=10)
+        ensure_model(ratings=other, path=artifact)
+
+        app = create_app(ratings=ratings, movies=movies, path=artifact)
+        with TestClient(app) as test_client:
+            payload = test_client.get("/health").json()
+            assert payload["n_users"] == 10
+
+    def test_missing_ratings_fails_without_artifact(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "no_such_dir"))
+        app = create_app(path=tmp_path / "absent.joblib", ratings=None)
+        with pytest.raises(FileNotFoundError):
+            with TestClient(app):
+                pass
+
+
+class TestModelPersistence:
+    """Tests for save_model / load_model / ensure_model."""
+
+    def test_roundtrip_preserves_recommendations(self, service_data, tmp_path):
+        ratings, held_out, _ = service_data
+        model = ItemItemKNNRecommender(n_neighbors=5)
+        model.fit(ratings)
+
+        artifact = tmp_path / "knn.joblib"
+        save_model(model, artifact)
+        restored = load_model(artifact)
+
+        assert type(restored) is ItemItemKNNRecommender
+        for user_id in (1, 17, 40):
+            assert restored.recommend(user_id, k=1) == model.recommend(
+                user_id, k=1
+            )
+            assert restored.recommend(user_id, k=1) == [held_out[user_id]]
+
+    def test_ensure_model_creates_missing_artifact(
+        self, service_data, tmp_path
+    ):
+        ratings, _, _ = service_data
+        artifact = tmp_path / "nested" / "model.joblib"
+        ensure_model(ratings=ratings, path=artifact)
+        assert artifact.exists()
+
+    def test_ensure_model_reuses_existing_artifact(
+        self, service_data, tmp_path
+    ):
+        ratings, _, _ = service_data
+        artifact = tmp_path / "model.joblib"
+        first = ensure_model(ratings=ratings, path=artifact)
+        # A second call must load, not fit: pass empty ratings that would
+        # crash a refit
+        second = ensure_model(ratings=ratings.iloc[0:0], path=artifact)
+        assert type(second) is type(first)
+        assert second.recommend(1, k=1) == first.recommend(1, k=1)

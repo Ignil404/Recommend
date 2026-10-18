@@ -40,3 +40,22 @@ jobs:
           curl -sf http://127.0.0.1:8000/health
           curl -sf "http://127.0.0.1:8000/recommendations/1?k=5"
           kill $SERVER_PID
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t recommender .
+
+      - name: Run container and smoke-test it
+        run: |
+          docker run -d --rm -p 8000:8000 --name recommender recommender
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8000/health && break
+            sleep 2
+          done
+          curl -sf "http://127.0.0.1:8000/recommendations/1?k=5"
+          docker stop recommender

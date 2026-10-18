@@ -24,8 +24,10 @@ src/models/
   collaborative.py        # item-item KNN, truncated SVD, implicit ALS
 src/service/
   app.py                  # FastAPI app: /health, /recommendations/{user_id}
+  build_model.py          # Prebuild the model artifact (joblib)
 tests/                    # pytest suite
-.github/workflows/ci.yml  # CI: ruff + pytest + API smoke test
+Dockerfile                # Container: deps + data + prebuilt model artifact
+.github/workflows/ci.yml  # CI: ruff + pytest + API smoke test + docker build
 ```
 
 ## Setup
@@ -65,7 +67,19 @@ python -m scripts.benchmark
 
 # Run the recommendation API (fits item-item KNN on startup, ~15 s)
 python -m src.service.app
+
+# Prebuild the model artifact so restarts skip the fit (~15 s once)
+python -m src.service.build_model
 ```
+
+API configuration (environment variables):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATA_DIR` | `data/ml-1m` | Directory with `ratings.dat` / `movies.dat` |
+| `MODEL_PATH` | `artifacts/recommender.joblib` | Model artifact (loaded or created) |
+| `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in containers) |
+| `PORT` | `8000` | HTTP port |
 
 API usage:
 
@@ -75,6 +89,13 @@ curl http://127.0.0.1:8000/health
 
 curl "http://127.0.0.1:8000/recommendations/1?k=3"
 # {"user_id":1,"known_user":true,"k":3,"items":[{"movie_id":1196,"title":"Star Wars: Episode V ..."}, ...]}
+```
+
+## Docker
+
+```bash
+docker build -t recommender .        # installs deps, downloads data, prebuilds model
+docker run -p 8000:8000 recommender  # starts instantly: the artifact is baked in
 ```
 
 ## Evaluation protocol
@@ -155,3 +176,6 @@ ruff check .              # lint
       ALS (documented negative result: item-item KNN still wins)
 - [x] Stage 7 — serving (FastAPI: /health + /recommendations with titles and
       cold-start fallback) + GitHub Actions CI (ruff, pytest, API smoke test)
+- [x] Stage 8 — production service: model artifact (joblib, warm start),
+      env-based config, Dockerfile with prebuilt model + healthcheck,
+      CI docker job

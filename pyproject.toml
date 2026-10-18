@@ -15,6 +15,7 @@ dependencies = [
     "scipy>=1.10",
     "requests>=2.31",
     "tqdm>=4.65",
+    "joblib>=1.3",
     "fastapi>=0.110",
     "uvicorn>=0.23",
 ]
@@ -30,6 +31,10 @@ dev = [
     "matplotlib>=3.7",
     "seaborn>=0.12",
 ]
+
+# Installable packages: "src" is the import root (src.models, src.service)
+[tool.setuptools]
+packages = ["src", "src.models", "src.service"]
 
 [tool.ruff]
 line-length = 88

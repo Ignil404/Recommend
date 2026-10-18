@@ -1,6 +1,9 @@
 # Data directory
 data/
 
+# Model artifacts
+artifacts/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -26,6 +29,7 @@ env/
 
 # Environment
 .env
+.opencode
 
 # Notebooks
 notebooks/*_executed.ipynb

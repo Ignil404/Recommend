@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+venv
+env
+.opencode
+.pytest_cache
+.ruff_cache
+**/__pycache__
+notebooks
+openspec
+tests
+data
+artifacts
+*.ipynb
+.DS_Store
